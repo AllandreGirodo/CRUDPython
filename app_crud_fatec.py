@@ -1,6 +1,9 @@
 # Instale as dependências fora do script, por exemplo:
 #   pip install psycopg2-binary python-dotenv
 
+# =========================================================================
+# BLOCO 1: IMPORTAÇÕES E CONFIGURAÇÕES INICIAIS
+# =========================================================================
 from typing import Optional, Iterator # Para Anotações de Tipo (avançado)
 import psycopg2 as pg # Biblioteca para PostgreSQL
 from psycopg2.extensions import connection # Tipo de conexão do psycopg2
@@ -11,6 +14,7 @@ import sys # Para sys.exit()
 import getpass # Importa para esconder a senha no terminal
 from dotenv import load_dotenv # Para carregar variáveis do .env
 import json # Para manipulação de JSON
+import time # Para a animação de loading
 import requests # Para requisições HTTP (importação de dados da web)
 import zipfile  # Para manipulação de arquivos ZIP
 from datetime import datetime # Para manipulação de datas
@@ -22,16 +26,19 @@ init(autoreset=True)
 
 load_dotenv()  # Carrega as variáveis do arquivo .env
 
-# --- Configuração do Banco de Dados ---
+# --- 1.1. Configuração do Banco de Dados ---
 # ATENÇÃO: A senha será lida de uma VARIÁVEL DE AMBIENTE para segurança!
 DB_CONFIG = {
     "database": os.getenv("DB_NAME", "db_prova_crud"),
-    "user": os.getenv("DB_USER", "postgres"),
+    "user": os.getenv("DB_USER", "postgres"), # Usuário do banco
     "password": os.getenv("PG_PASSWORD"),  # <==== Lendo a Senha da Variavel de Ambiente
     "host": os.getenv("DB_HOST", "127.0.0.1"),
     "port": os.getenv("DB_PORT", "5432")
 }
 
+# =========================================================================
+# BLOCO 2: GERENCIAMENTO DA CONEXÃO COM O BANCO DE DADOS
+# =========================================================================
 def conectar_db() -> Optional[connection]:
     """Tenta estabelecer a conexão com o PostgreSQL, lendo a senha do ambiente."""
     # A verificação da senha é feita aqui:
@@ -43,14 +50,14 @@ def conectar_db() -> Optional[connection]:
         
     try:
         con = pg.connect(**DB_CONFIG)
-        print("✅ Conexão com o banco de dados estabelecida com sucesso!")
+        print("✅ Conexão com o banco de dados estabelecida com sucesso! 🔗")
         return con
     except Exception as erro:
         print(f"\n❌ ERRO CRÍTICO: Não foi possível conectar ao banco de dados. Detalhes: {erro}")
         sys.exit(1)
         return None
 
-#--- Pool de Conexões ---
+#--- 2.1. Pool de Conexões ---
 # Utilizando pool de conexões para melhor performance em aplicações maiores
 # Exemplo básico de pool de conexões
 class DatabasePool:
@@ -66,7 +73,7 @@ class DatabasePool:
                 sys.exit(1)
             print("Inicializando pool de conexões...")
             cls._pool = pool.SimpleConnectionPool(minconn, maxconn, **DB_CONFIG)
-            print("✅ Pool de conexões pronto.")
+            print("✅ Pool de conexões pronto. 🏦")
         return cls._pool
 
     @classmethod
@@ -93,6 +100,7 @@ def get_db_connection() -> Iterator[PgConnection]:
     finally:
         DatabasePool.return_connection(conn)
 
+# --- 2.2. Função de Logging ---
 def log_evento(level: str, message: str):
     """Registra um evento (log) na tabela de logs do banco de dados."""
     # Não queremos que um erro de log quebre a aplicação principal.
@@ -108,20 +116,21 @@ def log_evento(level: str, message: str):
         # Se o logging no banco falhar, imprime no console como fallback.
         print(f"CRITICAL LOGGING ERROR: {e}")
 
-#--- Criação e Inicialização das Tabelas ---
-# As tabelas serão criadas se não existirem
+# =========================================================================
+# BLOCO 3: DEFINIÇÃO DA ESTRUTURA DO BANCO DE DADOS (DDL)
+# =========================================================================
 def criar_tabelas():
     """Cria e inicializa as tabelas necessárias para o projeto."""
     
     # As instruções DDL (Data Definition Language)
     sql_ddl = """
-    -- 1. Tabela Usuários (Requisito de Login)
+    -- 1. Tabela de Usuários (Requisito de Login)
     CREATE TABLE IF NOT EXISTS usuarios (
-        id SERIAL PRIMARY KEY,
+        id SERIAL PRIMARY KEY, 
         username VARCHAR(50) UNIQUE NOT NULL,
         senha VARCHAR(100) NOT NULL
     );
-
+    
     -- 2. Tabela Clientes (Principal CRUD - Mínimo 3 operações)
     CREATE TABLE IF NOT EXISTS clientes (
         id SERIAL PRIMARY KEY,
@@ -130,7 +139,7 @@ def criar_tabelas():
         telefone VARCHAR(20)
     );
     
-    -- 3. Tabela Pedidos (Terceira Tabela de Requisito)
+    -- 3. Tabela de Pedidos (Terceira Tabela de Requisito)
     CREATE TABLE IF NOT EXISTS pedidos (
         id SERIAL PRIMARY KEY,
         cliente_id INTEGER REFERENCES clientes(id) ON DELETE CASCADE,
@@ -139,19 +148,39 @@ def criar_tabelas():
         valor DECIMAL(10, 2)
     );
     
-    -- 4. Tabela Dados Importados (Requisito de Importação da Web)
+    -- 4. Tabela de Dados Importados (Requisito de Importação da Web)
     CREATE TABLE IF NOT EXISTS dados_importados (
         id SERIAL PRIMARY KEY,
-        dado_json JSONB
-        , status VARCHAR(20) NOT NULL DEFAULT 'NOVO' -- NOVO, PROCESSADO, ERRO
+        dado_json JSONB, 
+        status VARCHAR(20) NOT NULL DEFAULT 'NOVO' -- Status: NOVO, EM_CONFIRMACAO, PROCESSADO, ERRO
     );
-
+    
     -- 5. Tabela de Logs para auditoria e debug
     CREATE TABLE IF NOT EXISTS logs (
         id SERIAL PRIMARY KEY,
         timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         level VARCHAR(10) NOT NULL,
         message TEXT NOT NULL
+    );
+
+    -- 6. Tabelas Temporárias (Staging Area) para confirmação de dados
+    CREATE TABLE IF NOT EXISTS temp_clientes (
+        batch_id INTEGER NOT NULL, -- ID do registro em dados_importados
+        id INTEGER NOT NULL,
+        nome VARCHAR(100) NOT NULL,
+        email VARCHAR(100) NOT NULL,
+        telefone VARCHAR(20),
+        PRIMARY KEY (batch_id, id) -- Chave primária composta
+    );
+
+    CREATE TABLE IF NOT EXISTS temp_pedidos (
+        batch_id INTEGER NOT NULL, -- ID do registro em dados_importados
+        id INTEGER NOT NULL,
+        cliente_id INTEGER,
+        data_pedido DATE,
+        item VARCHAR(100),
+        valor DECIMAL(10, 2),
+        PRIMARY KEY (batch_id, id) -- Chave primária composta
     );
     """
     with get_db_connection() as con:
@@ -176,16 +205,15 @@ def criar_tabelas():
                     ALTER TABLE dados_importados ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'NOVO';
                 """)
             con.commit()
-            print("✅ Estrutura das tabelas criada/verificada e usuário padrão inserido.")
+            print("✅ Estrutura das tabelas criada/verificada e usuário padrão inserido. 🏗️")
         except Exception as erro:
             print(f"❌ ERRO ao criar ou inicializar tabelas: {erro}")
             con.rollback() # Desfaz as mudanças em caso de erro
 
 # =========================================================================
-# FUNÇÕES DE INTERFACE DO USUÁRIO (UI 1 e UI 2) - Adicionadas
+# BLOCO 4: LÓGICA DE AUTENTICAÇÃO E MENUS PRINCIPAIS
 # =========================================================================
-
-def verificar_credenciais(con, username, senha):
+def verificar_credenciais(con: PgConnection, username: str, senha: str) -> bool:
     """Verifica se o usuário e senha são válidos na tabela 'usuarios'."""
     sql = "SELECT username FROM usuarios WHERE username = %s AND senha = %s"
     try:
@@ -198,7 +226,7 @@ def verificar_credenciais(con, username, senha):
         pause()
         return False
 
-def ui_login(con):
+def ui_login(con: PgConnection) -> bool:
     """Interface Gráfica 1: Login (Requisito obrigatório)."""
     print("\n" + Fore.CYAN + "="*40 + Style.RESET_ALL)
     print(Fore.CYAN + "        SISTEMA DE CADASTRO - LOGIN" + Style.RESET_ALL)
@@ -210,7 +238,7 @@ def ui_login(con):
         if verificar_credenciais(con, username, senha):
             log_evento("INFO", f"Login bem-sucedido para o usuário '{username}'.")
             print("\n" + Fore.GREEN + "ACESSO CONCEDIDO. Bem-vindo(a)!" + Style.RESET_ALL)
-            # Select nome do usuario logado para exibir
+            # Seleciona o nome do usuário logado para exibir
             print(Fore.GREEN + f"Usuário logado: {username}" + Style.RESET_ALL)
 
             pause()
@@ -255,7 +283,7 @@ def ui_sobre():
     print(Fore.MAGENTA + "+"*40 + Style.RESET_ALL)
     print(Fore.MAGENTA + "Versão do Changelog: " + Style.RESET_ALL + "1.0.0")
 
-def ui_menu_principal(con):
+def ui_menu_principal(con: PgConnection):
     """UI 2: Menu Principal."""
     while True:
         clear_screen()
@@ -288,7 +316,10 @@ def ui_menu_principal(con):
         except ValueError:
             print(Fore.RED + "Entrada inválida. Digite um número." + Style.RESET_ALL)
 
-def ui_menu_clientes(con):
+# =========================================================================
+# BLOCO 5: CRUD DE CLIENTES
+# =========================================================================
+def ui_menu_clientes(con: PgConnection):
     """UI 4: Menu de Gerenciamento de Clientes."""
     while True:
         clear_screen()
@@ -323,7 +354,7 @@ def ui_menu_clientes(con):
             print(Fore.RED + "Entrada inválida. Digite um número." + Style.RESET_ALL)
             pause()
 
-def ui_buscar_cliente_por_nome(con):
+def ui_buscar_cliente_por_nome(con: PgConnection):
     """Busca clientes usando o operador LIKE para nomes parciais."""
     clear_screen()
     try:
@@ -358,7 +389,7 @@ def ui_buscar_cliente_por_nome(con):
     finally:
         pause()
 
-def ui_editar_cliente(con):
+def ui_editar_cliente(con: PgConnection):
     """UI 7: Editar Cliente (UPDATE)."""
     ui_listar_clientes(con)  # Mostra lista antes de pedir ID
     try:
@@ -371,14 +402,14 @@ def ui_editar_cliente(con):
         if not cliente:
             print("Cliente não encontrado!")
             return
-        # Solicita novos dados, mantendo os antigos se vazio    
+        # Solicita novos dados, mantendo os antigos se o campo for deixado em branco
         print(f"\nEditando cliente: {cliente[1]}")
         novo_nome = input(f"Novo nome ({cliente[1]}): ").strip() or cliente[1]
         novo_email = input(f"Novo email ({cliente[2]}): ").strip() or cliente[2]
         novo_tel = input(f"Novo telefone ({cliente[3] or 'Não cadastrado'}): ").strip() or cliente[3]
         # Atualiza os dados no banco
         cur.execute("""
-            UPDATE clientes 
+            UPDATE clientes
             SET nome = %s, email = %s, telefone = %s 
             WHERE id = %s""", (novo_nome, novo_email, novo_tel, cliente_id))
         con.commit()
@@ -392,7 +423,7 @@ def ui_editar_cliente(con):
         print(f"Erro ao editar cliente: {erro}")
         con.rollback()
 
-def ui_excluir_cliente(con):
+def ui_excluir_cliente(con: PgConnection):
     """UI: Excluir um cliente (DELETE)."""
     ui_listar_clientes(con, pausar=False) # Mostra a lista de clientes sem pausar
     try:
@@ -437,7 +468,7 @@ def ui_excluir_cliente(con):
     finally:
         pause()
 
-def ui_cadastrar_cliente(con):
+def ui_cadastrar_cliente(con: PgConnection):
     """UI: Cadastrar novo cliente (CREATE)."""
     try:
         nome = input("Nome do cliente: ").strip()
@@ -463,7 +494,10 @@ def ui_cadastrar_cliente(con):
         except Exception:
             pass
 
-def ui_menu_pedidos(con):
+# =========================================================================
+# BLOCO 6: CRUD DE PEDIDOS
+# =========================================================================
+def ui_menu_pedidos(con: PgConnection):
     """UI 12: Menu de Gerenciamento de Pedidos."""
     while True:
         clear_screen()
@@ -493,7 +527,7 @@ def ui_menu_pedidos(con):
         except ValueError:
             print(Fore.RED + "Entrada inválida. Digite um número." + Style.RESET_ALL)
 
-def ui_editar_pedido(con):
+def ui_editar_pedido(con: PgConnection):
     """UI: Edita o item e o valor de um pedido existente (UPDATE)."""
     ui_listar_pedidos(con)
     try:
@@ -541,7 +575,7 @@ def ui_editar_pedido(con):
     finally:
         pause()
 
-def ui_listar_pedidos(con):
+def ui_listar_pedidos(con: PgConnection):
     """UI: Lista todos os pedidos cadastrados com formatação brasileira."""
     clear_screen()
     try:
@@ -565,15 +599,15 @@ def ui_listar_pedidos(con):
             print(Fore.YELLOW + "-"*105 + Style.RESET_ALL)
             for pedido in pedidos:
                 try:
-                    # data_pedido is now at index 3
-                    data_formatada = pedido[3].strftime("%d de %B de %Y")
+                    # data_pedido agora está no índice 3
+                    data_formatada = pedido[3].strftime4("%d de %B de %Y")
                 except:
                     data_formatada = pedido[3].strftime("%d/%m/%Y")
                 
                 # Tratamento para valores nulos (None)
-                item_str = (pedido[4] or "N/D")[:19]
+                item_str = (pedido[4] or "N/D")[:19] # 'N/D' para item não definido
                 valor_num = pedido[5] if pedido[5] is not None else 0.0
-                valor_str = f"R$ {valor_num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                valor_str = f"R$ {valor_num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") # Formatação para moeda brasileira
 
                 print(Fore.WHITE + "{:<9} {:<10} {:<25} {:<25} {:<20} ".format(
                     pedido[0], pedido[1], pedido[2][:24], data_formatada, item_str
@@ -588,7 +622,7 @@ def ui_listar_pedidos(con):
     finally:
         pause()
 
-def ui_cadastrar_pedido(con):
+def ui_cadastrar_pedido(con: PgConnection):
     """UI: Cadastrar novo pedido (CREATE)."""
     # Mostra a lista de clientes para ajudar na escolha do ID
     ui_listar_clientes(con, pausar=False)
@@ -638,7 +672,7 @@ def ui_cadastrar_pedido(con):
         except Exception:
             pass
 
-def ui_listar_clientes(con, pausar=True):
+def ui_listar_clientes(con: PgConnection, pausar: bool = True):
     """UI 5: Lista todos os clientes cadastrados."""
     clear_screen()
     try:
@@ -668,7 +702,7 @@ def ui_listar_clientes(con, pausar=True):
         if pausar:
             pause()
 
-def ui_excluir_pedido(con):
+def ui_excluir_pedido(con: PgConnection):
     """UI: Excluir um pedido (DELETE)."""
     try:
         pedido_id_str = input("ID do pedido a excluir: ").strip()
@@ -693,7 +727,10 @@ def ui_excluir_pedido(con):
         except Exception:
             pass
 
-def ui_menu_especial(con):
+# =========================================================================
+# BLOCO 7: FUNCIONALIDADES ESPECIAIS (IMPORTAÇÃO/EXPORTAÇÃO/LOGS)
+# =========================================================================
+def ui_menu_especial(con: PgConnection):
     """UI 15: Menu de Funcionalidades Especiais."""
     while True:
         #clear_screen()
@@ -703,8 +740,11 @@ def ui_menu_especial(con):
         print(Fore.MAGENTA + "[1] " + Fore.CYAN + "Exportar Dados (JSON + ZIP)📦")
         print(Fore.MAGENTA + "[2] " + Fore.CYAN + "Importar Dados da Web 🌐")
         print(Fore.MAGENTA + "[3] " + Fore.CYAN + "Importar Dados de Arquivo Local 📁")
-        print(Fore.MAGENTA + "[4] " + Fore.CYAN + "Processar Dados Importados ⚙️")
-        print(Fore.MAGENTA + "[5] " + Fore.CYAN + "Visualizar Logs 📜")
+        print(Fore.MAGENTA + "[4] " + Fore.CYAN + "Processar Dados para Confirmação ⚙️")
+        print(Fore.MAGENTA + "[5] " + Fore.CYAN + "Confirmar Dados em Espera ✅")
+        print(Fore.MAGENTA + "[6] " + Fore.CYAN + "Exportar Dados para Web (JSON URL) 🚀")
+        print(Fore.MAGENTA + "[7] " + Fore.CYAN + "Visualizar Logs do Sistema 📜")
+        print(Fore.MAGENTA + "[8] " + Fore.CYAN + "Ver Histórico de Dados Processados 👁️")
         print(Fore.RED + "[0] " + Fore.CYAN + "Voltar ao Menu Principal" + Style.RESET_ALL)
         print(Fore.CYAN + "="*45 + Style.RESET_ALL)
         try:
@@ -718,7 +758,13 @@ def ui_menu_especial(con):
             elif opcao == 4:
                 ui_processar_dados_importados(con)
             elif opcao == 5:
+                ui_confirmar_dados_processados(con)
+            elif opcao == 6:
+                ui_exportar_dados_para_web(con)
+            elif opcao == 7:
                 ui_visualizar_logs(con)
+            elif opcao == 8:
+                ui_visualizar_dados_processados(con)
             elif opcao == 0:
                 break
             else:
@@ -726,7 +772,7 @@ def ui_menu_especial(con):
         except ValueError:
             print("Entrada inválida. Digite um número.")
 
-def ui_importar_dados_local(con):
+def ui_importar_dados_local(con: PgConnection):
     """Lista arquivos .json no diretório local e importa o escolhido para o banco."""
     clear_screen()
     try:
@@ -777,18 +823,26 @@ def ui_importar_dados_local(con):
     finally:
         pause()
 
-# MENU DE PROCESSAMENTO DE DADOS IMPORTADOS
-# =========================================================================
-# FUNÇÕES DE INTERFACE DO USUÁRIO (UI 3) - Adicionadas
-# =========================================================================
-def ui_processar_dados_importados(con):
-    """Interface para visualizar, validar e importar dados da tabela 'dados_importados'."""
+def _find_data_in_json(dado_json: dict) -> dict:
+    """
+    Procura por 'clientes' e 'pedidos' no JSON.
+    Primeiro, tenta no nível raiz. Se não encontrar, procura dentro de uma chave 'record'.
+    Isso torna a função compatível com diferentes formatos de JSON de entrada.
+    """
+    if 'clientes' in dado_json or 'pedidos' in dado_json:
+        return dado_json
+    if 'record' in dado_json and isinstance(dado_json['record'], dict):
+        return dado_json['record']
+    return {} # Retorna um dicionário vazio se não encontrar os dados
+
+def ui_processar_dados_importados(con: PgConnection):
+    """Lê um JSON com status 'NOVO', insere os dados em tabelas temporárias e muda o status para 'EM_CONFIRMACAO'."""
     while True:
         clear_screen()
         try:
             with con.cursor() as cur:
                 # Demonstração de fetchall
-                cur.execute("SELECT id, status, dado_json->>'name' as nome FROM dados_importados ORDER BY id")
+                cur.execute("SELECT id, status, COALESCE(dado_json->'metadata'->>'name', dado_json->>'name') as nome FROM dados_importados ORDER BY id")
                 registros = cur.fetchall() # Lista de tuplas (id, status, nome)
 
             print("\n" + Fore.MAGENTA + "="*60 + Style.RESET_ALL)
@@ -802,13 +856,17 @@ def ui_processar_dados_importados(con):
 
             print(Fore.CYAN + "{:<5} {:<15} {}".format("ID", "STATUS", "NOME (do JSON)") + Style.RESET_ALL)
             print(Fore.YELLOW + "-"*60 + Style.RESET_ALL)
+            status_cores = {
+                'NOVO': Fore.GREEN,
+                'EM_CONFIRMACAO': Fore.YELLOW,
+                'PROCESSADO': Fore.WHITE
+            }
             for reg in registros:
-                status_cor = Fore.GREEN if reg[1] == 'NOVO' else Fore.WHITE
+                status_cor = status_cores.get(reg[1], Fore.RED)
                 print(status_cor + "{:<5} {:<15} {}".format(reg[0], reg[1], reg[2] or "N/A") + Style.RESET_ALL)
 
             print("\n" + Fore.CYAN + "Digite o ID do registro para processar ou '0' para voltar." + Style.RESET_ALL)
             id_str = input("Escolha o ID: ").strip()
-
             if id_str == '0':
                 break
             
@@ -826,7 +884,7 @@ def ui_processar_dados_importados(con):
             
             dado_json, status = registro_selecionado
             if status != 'NOVO':
-                print(f"{Fore.YELLOW}O registro ID {id_registro} já foi processado.{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}O registro ID {id_registro} não está com status 'NOVO'. Apenas registros novos podem ser processados.{Style.RESET_ALL}")
                 pause()
                 continue
 
@@ -834,69 +892,58 @@ def ui_processar_dados_importados(con):
             print(json.dumps(dado_json, indent=2, ensure_ascii=False))
             print(Fore.BLUE + "------------------------------------" + Style.RESET_ALL)
 
-            confirmacao = input(f"\n{Fore.YELLOW}Deseja processar e sincronizar clientes e pedidos deste arquivo? (S/N): {Style.RESET_ALL}").strip().upper()
+            confirmacao = input(f"\n{Fore.YELLOW}Deseja carregar estes dados para a área de confirmação? (S/N): {Style.RESET_ALL}").strip().upper()
 
             if confirmacao == 'S':
-                clientes_inseridos = 0
-                clientes_ignorados = 0
-                pedidos_inseridos = 0
-                pedidos_ignorados = 0
+                # Procura os dados no JSON (seja na raiz ou em 'record')
+                dados_encontrados = _find_data_in_json(dado_json)
+
+                if not dados_encontrados:
+                    raise ValueError("Estrutura de JSON não reconhecida. Chaves 'clientes' ou 'pedidos' não encontradas.")
+
+                clientes_carregados = 0
+                pedidos_carregados = 0
 
                 with con.cursor() as cur:
-                    # Processar Clientes
-                    if 'clientes' in dado_json and isinstance(dado_json['clientes'], list):
-                        for cliente_data in dado_json['clientes']:
-                            cur.execute("SELECT id FROM clientes WHERE id = %s", (cliente_data.get('id'),))
-                            if cur.fetchone():
-                                clientes_ignorados += 1
-                            else:
-                                cur.execute(
-                                    "INSERT INTO clientes (id, nome, email, telefone) VALUES (%s, %s, %s, %s)",
-                                    (cliente_data.get('id'), cliente_data.get('nome'), cliente_data.get('email'), cliente_data.get('telefone'))
-                                )
-                                clientes_inseridos += 1
+                    # Limpa dados antigos do mesmo batch_id para permitir reprocessamento
+                    cur.execute("DELETE FROM temp_clientes WHERE batch_id = %s", (id_registro,))
+                    cur.execute("DELETE FROM temp_pedidos WHERE batch_id = %s", (id_registro,))
 
-                    # Processar Pedidos
-                    if 'pedidos' in dado_json and isinstance(dado_json['pedidos'], list):
-                        for pedido_data in dado_json['pedidos']:
-                            cur.execute("SELECT id FROM pedidos WHERE id = %s", (pedido_data.get('id'),))
-                            if cur.fetchone():
-                                pedidos_ignorados += 1
-                            else:
-                                # Verifica se o cliente do pedido existe antes de inserir
-                                cur.execute("SELECT id FROM clientes WHERE id = %s", (pedido_data.get('cliente_id'),))
-                                if cur.fetchone():
-                                    cur.execute(
-                                        "INSERT INTO pedidos (id, cliente_id, data_pedido, item, valor) VALUES (%s, %s, %s, %s, %s)",
-                                        (pedido_data.get('id'), pedido_data.get('cliente_id'), pedido_data.get('data_pedido'), pedido_data.get('item'), pedido_data.get('valor'))
-                                    )
-                                    pedidos_inseridos += 1
-                                else:
-                                    pedidos_ignorados += 1 # Ignora pedido se o cliente não existe
+                    # Carregar Clientes para a tabela temporária
+                    if 'clientes' in dados_encontrados and isinstance(dados_encontrados['clientes'], list):
+                        for cliente in dados_encontrados['clientes']:
+                            cur.execute(
+                                """INSERT INTO temp_clientes (batch_id, id, nome, email, telefone) 
+                                   VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                                (id_registro, cliente.get('id'), cliente.get('nome'), cliente.get('email'), cliente.get('telefone'))
+                            )
+                            clientes_carregados += cur.rowcount
 
-                    # Atualiza o status do registro JSON para 'PROCESSADO'
-                    cur.execute("UPDATE dados_importados SET status = 'PROCESSADO' WHERE id = %s", (id_registro,))
+                    # Carregar Pedidos para a tabela temporária
+                    if 'pedidos' in dados_encontrados and isinstance(dados_encontrados['pedidos'], list):
+                        for pedido in dados_encontrados['pedidos']:
+                            cur.execute(
+                                """INSERT INTO temp_pedidos (batch_id, id, cliente_id, data_pedido, item, valor) 
+                                   VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                                (id_registro, pedido.get('id'), pedido.get('cliente_id'), pedido.get('data_pedido'), pedido.get('item'), pedido.get('valor'))
+                            )
+                            pedidos_carregados += cur.rowcount
 
-                    # Atualiza as sequências para evitar conflitos de ID no futuro
-                    if clientes_inseridos > 0:
-                        cur.execute("SELECT setval('clientes_id_seq', (SELECT MAX(id) FROM clientes));")
-                    if pedidos_inseridos > 0:
-                        cur.execute(
-                            "SELECT setval('pedidos_id_seq', (SELECT MAX(id) FROM pedidos));"
-                        )
+                    # Atualiza o status do registro JSON para 'EM_CONFIRMACAO'
+                    cur.execute("UPDATE dados_importados SET status = 'EM_CONFIRMACAO' WHERE id = %s", (id_registro,))
+
                 con.commit()
 
-                print(f"\n{Fore.GREEN}--- Relatório de Sincronização ---{Style.RESET_ALL}")
-                print(f"Clientes Inseridos: {Fore.GREEN}{clientes_inseridos}{Style.RESET_ALL}")
-                print(f"Clientes Ignorados (já existiam): {Fore.YELLOW}{clientes_ignorados}{Style.RESET_ALL}")
-                print(f"Pedidos Inseridos: {Fore.GREEN}{pedidos_inseridos}{Style.RESET_ALL}")
-                print(f"Pedidos Ignorados (já existiam ou cliente não encontrado): {Fore.YELLOW}{pedidos_ignorados}{Style.RESET_ALL}")
+                print(f"\n{Fore.GREEN}--- Dados Carregados para Confirmação ---{Style.RESET_ALL}")
+                print(f"Clientes carregados na área de espera: {Fore.GREEN}{clientes_carregados}{Style.RESET_ALL}")
+                print(f"Pedidos carregados na área de espera: {Fore.GREEN}{pedidos_carregados}{Style.RESET_ALL}")
+                print(f"\n{Fore.YELLOW}Vá para o menu 'Confirmar Dados em Espera' para finalizar a importação.{Style.RESET_ALL}")
                 
-                log_msg = f"JSON ID {id_registro} processado. Clientes: {clientes_inseridos} inseridos, {clientes_ignorados} ignorados. Pedidos: {pedidos_inseridos} inseridos, {pedidos_ignorados} ignorados."
+                log_msg = f"JSON ID {id_registro} processado para staging. Clientes: {clientes_carregados}, Pedidos: {pedidos_carregados}."
                 log_evento("INFO", log_msg)
 
             else:
-                print(f"{Fore.CYAN}Importação cancelada pelo usuário.{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Processamento cancelado pelo usuário.{Style.RESET_ALL}")
 
             pause()
 
@@ -908,7 +955,145 @@ def ui_processar_dados_importados(con):
             con.rollback()
             pause()
 
-def ui_visualizar_logs(con):
+def ui_visualizar_lote_temporario(con: PgConnection, id_lote: int):
+    """Exibe os dados de clientes e pedidos de um lote específico nas tabelas temporárias."""
+    clear_screen()
+    try:
+        with con.cursor() as cur:
+            # Buscar clientes temporários
+            cur.execute("SELECT id, nome, email, telefone FROM temp_clientes WHERE batch_id = %s ORDER BY id", (id_lote,))
+            clientes_temp = cur.fetchall()
+
+            # Buscar pedidos temporários
+            cur.execute("SELECT id, cliente_id, data_pedido, item, valor FROM temp_pedidos WHERE batch_id = %s ORDER BY id", (id_lote,))
+            pedidos_temp = cur.fetchall()
+
+        print(f"\n{Fore.MAGENTA}--- PRÉ-VISUALIZAÇÃO DO LOTE DE DADOS ID: {id_lote} ---{Style.RESET_ALL}")
+
+        # Exibir clientes
+        print(f"\n{Fore.CYAN}CLIENTES A SEREM IMPORTADOS ({len(clientes_temp)} registros):{Style.RESET_ALL}")
+        if clientes_temp:
+            print(Fore.YELLOW + "-"*75 + Style.RESET_ALL)
+            print(Fore.CYAN + "{:<5} {:<25} {:<25} {:<15}".format("ID", "NOME", "EMAIL", "TELEFONE") + Style.RESET_ALL)
+            print(Fore.YELLOW + "-"*75 + Style.RESET_ALL)
+            for cliente in clientes_temp:
+                print("{:<5} {:<25} {:<25} {:<15}".format(cliente[0], cliente[1][:24], cliente[2][:24], cliente[3] or ""))
+        else:
+            print(f"{Fore.YELLOW}Nenhum cliente neste lote.{Style.RESET_ALL}")
+
+        # Exibir pedidos
+        print(f"\n{Fore.CYAN}PEDIDOS A SEREM IMPORTADOS ({len(pedidos_temp)} registros):{Style.RESET_ALL}")
+        if pedidos_temp:
+            print(Fore.YELLOW + "-"*80 + Style.RESET_ALL)
+            print(Fore.CYAN + "{:<10} {:<12} {:<15} {:<25} {:<12}".format("ID PEDIDO", "ID CLIENTE", "DATA", "ITEM", "VALOR") + Style.RESET_ALL)
+            print(Fore.YELLOW + "-"*80 + Style.RESET_ALL)
+            for pedido in pedidos_temp:
+                data_formatada = pedido[2].strftime("%d/%m/%Y") if pedido[2] else "N/A"
+                valor_num = pedido[4] if pedido[4] is not None else 0.0
+                valor_str = f"R$ {valor_num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                print("{:<10} {:<12} {:<15} {:<25} {:<12}".format(pedido[0], pedido[1], data_formatada, (pedido[3] or "N/D")[:24], valor_str))
+        else:
+            print(f"{Fore.YELLOW}Nenhum pedido neste lote.{Style.RESET_ALL}")
+
+        log_evento("INFO", f"Pré-visualização do lote temporário ID {id_lote} realizada.")
+
+    except Exception as e:
+        log_evento("ERROR", f"Erro ao visualizar lote temporário ID {id_lote}: {e}")
+        print(f"{Fore.RED}Erro ao exibir dados do lote: {e}{Style.RESET_ALL}")
+    finally:
+        pause()
+
+def ui_confirmar_dados_processados(con: PgConnection):
+    """Exibe lotes (batches) em espera e permite confirmar sua inserção nas tabelas principais."""
+    while True:
+        clear_screen()
+        try:
+            with con.cursor() as cur:
+                # Conta quantos clientes e pedidos estão em espera para cada lote
+                cur.execute("""
+                    SELECT 
+                        di.id, 
+                        COUNT(DISTINCT tc.id) as num_clientes, 
+                        COUNT(DISTINCT tp.id) as num_pedidos
+                    FROM dados_importados di
+                    LEFT JOIN temp_clientes tc ON di.id = tc.batch_id
+                    LEFT JOIN temp_pedidos tp ON di.id = tp.batch_id
+                    WHERE di.status = 'EM_CONFIRMACAO'
+                    GROUP BY di.id
+                    ORDER BY di.id;
+                """)
+                lotes = cur.fetchall()
+
+            print("\n" + Fore.MAGENTA + "="*60 + Style.RESET_ALL)
+            print(Fore.MAGENTA + "        CONFIRMAÇÃO DE DADOS EM ESPERA" + Style.RESET_ALL)
+            print(Fore.MAGENTA + "="*60 + Style.RESET_ALL)
+
+            if not lotes:
+                print(Fore.YELLOW + "Nenhum lote de dados aguardando confirmação." + Style.RESET_ALL)
+                pause()
+                return
+
+            print(Fore.CYAN + "{:<10} {:<20} {:<20}".format("LOTE ID", "# CLIENTES", "# PEDIDOS") + Style.RESET_ALL)
+            print(Fore.YELLOW + "-"*60 + Style.RESET_ALL)
+            for lote in lotes:
+                print(Fore.YELLOW + "{:<10} {:<20} {:<20}".format(lote[0], lote[1], lote[2]) + Style.RESET_ALL)
+
+            print("\n" + Fore.CYAN + "Opções:" + Style.RESET_ALL)
+            print(" - Digite o " + Fore.GREEN + "ID do lote" + Style.RESET_ALL + " para confirmá-lo.")
+            print(" - Digite " + Fore.YELLOW + "'v <ID>'" + Style.RESET_ALL + " para visualizar o conteúdo de um lote (ex: v 42).")
+            print(" - Digite " + Fore.RED + "'0'" + Style.RESET_ALL + " para voltar.")
+            
+            id_str = input("\nEscolha a sua ação: ").strip()
+            if id_str == '0':
+                break
+            
+            if id_str.lower().startswith('v '):
+                id_lote_ver = int(id_str.split()[1])
+                ui_visualizar_lote_temporario(con, id_lote_ver)
+                continue
+            
+            id_lote = int(id_str)
+            confirmacao = input(f"\n{Fore.RED}Tem certeza que deseja inserir os dados do lote {id_lote} nas tabelas principais? (S/N): {Style.RESET_ALL}").strip().upper()
+
+            if confirmacao == 'S':
+                with con.cursor() as cur:
+                    # Insere clientes da tabela temporária, ignorando conflitos de ID
+                    cur.execute("""
+                        INSERT INTO clientes (id, nome, email, telefone)
+                        SELECT id, nome, email, telefone FROM temp_clientes WHERE batch_id = %s
+                        ON CONFLICT (id) DO NOTHING;
+                    """, (id_lote,))
+                    clientes_inseridos = cur.rowcount
+
+                    # Insere pedidos, mas apenas se o cliente correspondente já existir na tabela principal
+                    cur.execute("""
+                        INSERT INTO pedidos (id, cliente_id, data_pedido, item, valor)
+                        SELECT tp.id, tp.cliente_id, tp.data_pedido, tp.item, tp.valor 
+                        FROM temp_pedidos tp
+                        JOIN clientes c ON tp.cliente_id = c.id -- Garante que o cliente existe
+                        WHERE tp.batch_id = %s
+                        ON CONFLICT (id) DO NOTHING;
+                    """, (id_lote,))
+                    pedidos_inseridos = cur.rowcount
+
+                    # Limpa as tabelas temporárias para este lote
+                    cur.execute("DELETE FROM temp_clientes WHERE batch_id = %s", (id_lote,))
+                    cur.execute("DELETE FROM temp_pedidos WHERE batch_id = %s", (id_lote,))
+
+                    # Atualiza o status para PROCESSADO
+                    cur.execute("UPDATE dados_importados SET status = 'PROCESSADO' WHERE id = %s", (id_lote,))
+                
+                con.commit()
+                print(f"\n{Fore.GREEN}Lote {id_lote} confirmado com sucesso!{Style.RESET_ALL}")
+                print(f"Clientes inseridos/atualizados: {clientes_inseridos}")
+                print(f"Pedidos inseridos: {pedidos_inseridos}")
+                pause()
+        except Exception as e:
+            print(f"{Fore.RED}Erro ao confirmar dados: {e}{Style.RESET_ALL}")
+            con.rollback()
+            pause()
+
+def ui_visualizar_logs(con: PgConnection):
     """Exibe os últimos logs registrados no banco de dados."""
     clear_screen()
     try:
@@ -937,14 +1122,130 @@ def ui_visualizar_logs(con):
     finally:
         pause()
 
-def ui_exportar_dados(con):
-    """Exporta dados das tabelas clientes e pedidos para um arquivo JSON e compacta em ZIP."""
+def ui_visualizar_dados_processados(con: PgConnection):
+    """Exibe um resumo dos dados que já foram processados (status='PROCESSADO')."""
+    clear_screen()
     try:
-        cur = con.cursor()
-        cur.execute("SELECT id, nome, email, telefone FROM clientes ORDER BY id")
-        clientes = cur.fetchall()
-        cur.execute("SELECT id, cliente_id, data_pedido, item, valor FROM pedidos ORDER BY id")
-        pedidos = cur.fetchall()
+        with con.cursor() as cur:
+            # Seleciona apenas os registros com status 'PROCESSADO'
+            cur.execute("SELECT id, dado_json FROM dados_importados WHERE status = 'PROCESSADO' ORDER BY id DESC")
+            registros = cur.fetchall()
+
+        print("\n" + Fore.MAGENTA + "="*80 + Style.RESET_ALL)
+        print(Fore.MAGENTA + "              HISTÓRICO DE DADOS JÁ PROCESSADOS" + Style.RESET_ALL)
+        print(Fore.MAGENTA + "="*80 + Style.RESET_ALL)
+
+        if not registros:
+            print(Fore.YELLOW + "Nenhum dado com status 'PROCESSADO' foi encontrado." + Style.RESET_ALL)
+        else:
+            header = "{:<5} {:<20} {:<20}".format("ID", "CLIENTES NO JSON", "PEDIDOS NO JSON")
+            print(Fore.CYAN + header + Style.RESET_ALL)
+            print(Fore.YELLOW + "-"*80 + Style.RESET_ALL)
+            for reg in registros:
+                id_reg, dado_json = reg
+                # Adiciona verificação para garantir que dado_json é um dicionário
+                if isinstance(dado_json, dict):
+                    num_clientes = len(dado_json.get('clientes', []))
+                    num_pedidos = len(dado_json.get('pedidos', []))
+                    print("{:<5} {:<20} {:<20}".format(id_reg, num_clientes, num_pedidos))
+                else:
+                    # Se não for um dicionário (ex: uma lista), exibe N/A para evitar o erro
+                    print("{:<5} {:<20} {:<20}".format(id_reg, "N/A", "N/A"))
+        log_evento("INFO", "Visualização de dados processados executada.")
+    except Exception as e:
+        log_evento("ERROR", f"Erro ao visualizar dados processados: {e}")
+        print(f"{Fore.RED}Erro ao buscar dados processados: {e}{Style.RESET_ALL}")
+    finally:
+        pause()
+
+def ui_exportar_dados_para_web(con: PgConnection):
+    """Exporta dados para o JSONBin.io e exibe a URL pública."""
+    # Lê a chave da API do JSONBin.io das variáveis de ambiente
+    api_key = os.getenv("JSONBIN_API_KEY")
+
+    # Verifica se a chave foi configurada
+    if not api_key:
+        print(f"\n{Fore.RED}❌ ERRO: Chave de API para o JSONBin.io não configurada.{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Para usar esta função, você precisa de uma chave de API gratuita do JSONBin.io.{Style.RESET_ALL}") # type: ignore
+        print("1. Crie uma conta gratuita em: https://jsonbin.io/")
+        print("2. No painel, clique em 'API Keys' no menu superior.")
+        print("3. Copie a sua 'Master Key'.")
+        print("4. Configure-a como uma variável de ambiente chamada 'JSONBIN_API_KEY'.")
+        pause()
+        return
+
+    print(f"\n{Fore.CYAN}Preparando para exportar dados para a web...{Style.RESET_ALL}")
+    try:
+        with con.cursor() as cur:
+            cur.execute("SELECT id, nome, email, telefone FROM clientes ORDER BY id")
+            clientes = cur.fetchall()
+            cur.execute("SELECT id, cliente_id, data_pedido, item, valor FROM pedidos ORDER BY id")
+            pedidos = cur.fetchall()
+
+        print("\n" + Fore.CYAN + "--- DADOS A SEREM EXPORTADOS PARA A WEB ---" + Style.RESET_ALL)
+        print(f"Total de Clientes: {Fore.GREEN}{len(clientes)}{Style.RESET_ALL}")
+        print(f"Total de Pedidos:  {Fore.GREEN}{len(pedidos)}{Style.RESET_ALL}")
+
+        confirmacao = input(f"\n{Fore.YELLOW}Deseja continuar com a exportação destes dados? (S/N): {Style.RESET_ALL}").strip().upper()
+        if confirmacao != 'S':
+            print(f"\n{Fore.CYAN}Exportação cancelada pelo usuário.{Style.RESET_ALL}")
+            return
+
+        dados = {
+            "clientes": [
+                {"id": c[0], "nome": c[1], "email": c[2], "telefone": c[3]} for c in clientes
+            ],
+            "pedidos": [
+                {"id": p[0], "cliente_id": p[1], "data_pedido": str(p[2]), "item": p[3], "valor": float(p[4]) if p[4] is not None else None} for p in pedidos
+            ]
+        }
+
+        # URL da API v3 do JSONBin.io para criar um novo bin
+        url = "https://api.jsonbin.io/v3/b"
+        
+        # Cabeçalhos necessários para a API v3, usando a chave pessoal do usuário.
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Master-Key': api_key
+        }
+
+        print(f"Enviando dados para {url}...")
+        response = requests.post(url, headers=headers, json=dados)
+
+        if response.status_code == 200: # 200 é o código de sucesso para a criação de bin
+            response_data = response.json()
+            # A URL pública para visualização não é mais retornada diretamente, construímos ela.
+            url_publica = f"https://jsonbin.io/{response_data.get('metadata', {}).get('id')}"
+            print(f"\n{Fore.GREEN}✅ Dados exportados com sucesso!{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Sua URL pública é:{Style.RESET_ALL} {url_publica}")
+            log_evento("INFO", f"Dados exportados para a web com sucesso. URL: {url_publica}")
+        else:
+            raise Exception(f"Falha ao enviar dados. Status: {response.status_code}, Resposta: {response.text}")
+
+    except Exception as erro:
+        log_evento("ERROR", f"Falha ao exportar dados para a web: {erro}")
+        print(f"{Fore.RED}❌ Erro ao exportar dados para a web: {erro}{Style.RESET_ALL}")
+    finally:
+        pause()
+
+def ui_exportar_dados(con: PgConnection):
+    """Exporta dados das tabelas clientes e pedidos para um arquivo JSON e compacta em ZIP."""
+    clear_screen()
+    try:
+        with con.cursor() as cur:
+            cur.execute("SELECT id, nome, email, telefone FROM clientes ORDER BY id")
+            clientes = cur.fetchall()
+            cur.execute("SELECT id, cliente_id, data_pedido, item, valor FROM pedidos ORDER BY id")
+            pedidos = cur.fetchall()
+
+        print("\n" + Fore.CYAN + "--- DADOS A SEREM EXPORTADOS PARA ARQUIVO LOCAL ---" + Style.RESET_ALL)
+        print(f"Total de Clientes: {Fore.GREEN}{len(clientes)}{Style.RESET_ALL}")
+        print(f"Total de Pedidos:  {Fore.GREEN}{len(pedidos)}{Style.RESET_ALL}")
+
+        confirmacao = input(f"\n{Fore.YELLOW}Deseja continuar e criar os arquivos .json e .zip? (S/N): {Style.RESET_ALL}").strip().upper()
+        if confirmacao != 'S':
+            print(f"\n{Fore.CYAN}Exportação cancelada pelo usuário.{Style.RESET_ALL}")
+            return
 
         dados = {
             "clientes": [
@@ -967,18 +1268,20 @@ def ui_exportar_dados(con):
 
         log_evento("INFO", f"Dados exportados com sucesso para o arquivo '{zip_filename}'.")
         print(Fore.GREEN + f"Dados exportados para {json_filename} e compactados em {zip_filename}." + Style.RESET_ALL)
+
     except Exception as erro:
         log_evento("ERROR", f"Falha ao exportar dados: {erro}")
         print(Fore.RED + f"Erro ao exportar dados: {erro}" + Style.RESET_ALL)
+    finally:
+        pause()
 
-# UI 18: Importar Dados da Web (Requisito obrigatório).
-def ui_importar_dados(con):
+def ui_importar_dados(con: PgConnection):
     """Importa dados de uma fonte web e armazena na tabela dados_importados."""
     try:
         # URL de teste pública que retorna JSON
-        url_exemplo = 'https://generatedata.com/data/...'
+        url_exemplo = 'https://generatedata.com/data/... ou https://jsonbin.io/quick-store/'
 
-        print(f"Acesse {Fore.CYAN}generatedata.com{Style.RESET_ALL}, gere seus dados e cole a URL completa aqui.")
+        print(f"Acesse um gerador de JSON (ex: {Fore.CYAN}json-generator.com{Style.RESET_ALL}) e cole a URL aqui.")
         url = input(f"URL (ex: {url_exemplo}): ").strip()
 
         # Se o usuário não digitar nada, usa a URL padrão
@@ -996,7 +1299,7 @@ def ui_importar_dados(con):
         response = requests.get(url)
         print(Fore.BLUE + f"📄 Código de Status HTTP: {response.status_code}" + Style.RESET_ALL)
 
-        # Tratamento de erros detalhado lista de status codes comuns e suas mensagens
+        # Tratamento de erros detalhado com lista de códigos de status comuns e suas mensagens
         if response.status_code == 200:
             print("✅ Sucesso! Requisição concluída.")
         elif response.status_code == 201:
@@ -1028,27 +1331,41 @@ def ui_importar_dados(con):
         elif response.status_code == 504:
             raise ValueError("💥 Erro 504: Tempo de resposta esgotado.")
         else:
-            raise ValueError(f" Erro desconhecido. Código de status: {response.status_code}")
+            # Para outros códigos, apenas avisa, mas tenta continuar se houver conteúdo
+            print(f"{Fore.YELLOW}⚠️ Aviso: Código de status HTTP {response.status_code}. Tentando processar mesmo assim.{Style.RESET_ALL}")
 
-        # Verifica se o conteúdo retornado é JSON
-        content_type = response.headers.get('Content-Type', '')
-        if 'application/json' not in content_type:
-            raise ValueError(f" O conteúdo retornado não é JSON. Tipo encontrado: {content_type}")
+        # Tenta decodificar o JSON independentemente do Content-Type
+        try:
+            dado_json = response.json()
+        except json.JSONDecodeError:
+            raise ValueError("O conteúdo retornado não é um JSON válido, mesmo após a requisição bem-sucedida.")
 
-        print(Fore.GREEN + "✅ Dados obtidos com sucesso da web." + Style.RESET_ALL)
+        # ===== Pré-visualização e Confirmação do Usuário =====
+        clear_screen()
+        print(Fore.CYAN + "--- PRÉ-VISUALIZAÇÃO DOS DADOS DA WEB ---" + Style.RESET_ALL)
+        print(json.dumps(dado_json, indent=2, ensure_ascii=False))
+        print(Fore.CYAN + "-----------------------------------------" + Style.RESET_ALL)
 
-        # ===== Inserção no Banco =====
-        dado_json = response.json()
-        cur = con.cursor()
-        cur.execute(
-            "INSERT INTO dados_importados (dado_json) VALUES (%s) RETURNING id",
-            (json.dumps(dado_json),)
-        )
-        new_id = cur.fetchone()[0]
-        con.commit()
+        confirmacao = input(f"\n{Fore.YELLOW}Deseja salvar estes dados no banco de dados? (S/N): {Style.RESET_ALL}").strip().upper()
 
-        log_evento("INFO", f"Dados importados da web ({url}) e salvos no banco com ID {new_id}.")
-        print(Fore.GREEN + f"✅ Dados importados e salvos com sucesso. ID: {new_id}" + Style.RESET_ALL)
+        if confirmacao == 'S':
+            # ===== Inserção no Banco =====
+            with con.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO dados_importados (dado_json) VALUES (%s) RETURNING id",
+                    (json.dumps(dado_json),)
+                )
+                new_id = cur.fetchone()[0]
+            con.commit()
+
+            log_evento("INFO", f"Dados importados da web ({url}) e salvos no banco com ID {new_id}.")
+            print(f"\n{Fore.GREEN}✅ Dados importados e salvos com sucesso. ID do registro: {new_id}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}COMO VER OS DADOS:{Style.RESET_ALL}")
+            print("Para processar estes dados, vá para o menu:")
+            print(f"  {Fore.YELLOW}[3] Funcionalidades Especiais -> [4] Processar Dados para Confirmação{Style.RESET_ALL}")
+        else:
+            log_evento("INFO", f"Importação da web ({url}) cancelada pelo usuário após pré-visualização.")
+            print(f"\n{Fore.CYAN}Operação cancelada pelo usuário.{Style.RESET_ALL}")
 
     except requests.exceptions.MissingSchema:
         msg_erro = "Esquema de URL ausente (use http:// ou https://)."
@@ -1080,18 +1397,56 @@ def ui_importar_dados(con):
         except Exception:
             pass
 
-
+# =========================================================================
+# BLOCO 8: FUNÇÕES UTILITÁRIAS E EXECUÇÃO PRINCIPAL
+# =========================================================================
 def clear_screen():
     """Limpa a tela do terminal (compatível com Windows e Unix)."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def pause():
     """Aguarda o usuário pressionar ENTER para continuar."""
+    print() # Adiciona uma linha em branco para melhor espaçamento
     input("\nPressione ENTER para continuar...")
 
+# --- 8.2. Banner de Inicialização ---
+def exibir_banner_inicial():
+    """Exibe um banner de boas-vindas estilizado com ícone de banco de dados."""
+    clear_screen()
+
+    # Frames da animação para a palavra "PYTHON"
+    frames = [
+        f"{Fore.GREEN}        ██████╗ \n        ██╔══██╗\n        ██████╔╝\n        ██╔═══╝ \n        ██║     \n        ╚═╝     ",
+        f"{Fore.GREEN}        ██████╗ ██╗   ██╗\n        ██╔══██╗╚██╗ ██╔╝\n        ██████╔╝ ╚████╔╝ \n        ██╔═══╝   ╚██╔╝  \n        ██║        ██║   \n        ╚═╝        ╚═╝   ",
+        f"{Fore.GREEN}        ██████╗ ██╗   ██╗████████╗\n        ██╔══██╗╚██╗ ██╔╝╚══██╔══╝\n        ██████╔╝ ╚████╔╝    ██║   \n        ██╔═══╝   ╚██╔╝     ██║   \n        ██║        ██║      ██║   \n        ╚═╝        ╚═╝      ╚═╝   ",
+        f"{Fore.GREEN}        ██████╗ ██╗   ██╗████████╗██╗  ██╗\n        ██╔══██╗╚██╗ ██╔╝╚══██╔══╝██║  ██║\n        ██████╔╝ ╚████╔╝    ██║   ███████║\n        ██╔═══╝   ╚██╔╝     ██║   ██╔══██║\n        ██║        ██║      ██║   ██║  ██║\n        ╚═╝        ╚═╝      ╚═╝   ╚═╝  ╚═╝",
+        f"{Fore.GREEN}        ██████╗ ██╗   ██╗████████╗██╗  ██╗ ██████╗ \n        ██╔══██╗╚██╗ ██╔╝╚══██╔══╝██║  ██║██╔═══██╗\n        ██████╔╝ ╚████╔╝    ██║   ███████║██║   ██║\n        ██╔═══╝   ╚██╔╝     ██║   ██╔══██║██║   ██║\n        ██║        ██║      ██║   ██║  ██║╚██████╔╝\n        ╚═╝        ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ",
+        f"{Fore.GREEN}        ██████╗ ██╗   ██╗████████╗██╗  ██╗ ██████╗ ███╗   ██╗\n        ██╔══██╗╚██╗ ██╔╝╚══██╔══╝██║  ██║██╔═══██╗████╗  ██║\n        ██████╔╝ ╚████╔╝    ██║   ███████║██║   ██║██╔██╗ ██║\n        ██╔═══╝   ╚██╔╝     ██║   ██╔══██║██║   ██║██║╚██╗██║\n        ██║        ██║      ██║   ██║  ██║╚██████╔╝██║ ╚████║\n        ╚═╝        ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝"
+    ]
+
+    banner_top = f"{Fore.CYAN}======================================================================{Style.RESET_ALL}"
+    banner_bottom = f"{Fore.CYAN}     SISTEMA DE GERENCIAMENTO DE BANCO DE DADOS - FATEC RP\n======================================================================{Style.RESET_ALL}"
+
+    # Loop para a animação de "digitação"
+    for frame in frames:
+        clear_screen()
+        print(banner_top)
+        print(frame)
+        print(banner_bottom)
+        print(f"\n{Fore.YELLOW}Iniciando serviços...{Style.RESET_ALL}")
+        time.sleep(0.5) # Pausa entre cada letra
+
+    # Mantém o banner final visível por um instante antes de continuar
+    time.sleep(1)
+
+
+# --- 8.1. Função Principal (main) ---
 def main():
     """Função principal que gerencia o ciclo de vida da aplicação."""
     try:
+        # Exibe o banner de boas-vindas
+        exibir_banner_inicial()
+
         # Inicializa o pool e cria as tabelas se necessário
         log_evento("INFO", "Aplicação iniciada.")
         DatabasePool.get_pool()
@@ -1107,6 +1462,6 @@ def main():
     finally:
         DatabasePool.close_all()
 
-# Execução do programa (teste inicial)
+# --- Ponto de Entrada da Aplicação ---
 if __name__ == "__main__":
     main()
