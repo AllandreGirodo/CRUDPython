@@ -1,5 +1,5 @@
 # Instale as dependências fora do script, por exemplo:
-#   pip install psycopg2-binary python-dotenv
+#   pip install psycopg2-binary python-dotenv colorama requests
 
 # =========================================================================
 # BLOCO 1: IMPORTAÇÕES E CONFIGURAÇÕES INICIAIS
@@ -28,6 +28,9 @@ load_dotenv()  # Carrega as variáveis do arquivo .env
 
 # --- 1.1. Configuração do Banco de Dados ---
 # ATENÇÃO: A senha será lida de uma VARIÁVEL DE AMBIENTE para segurança!
+X_MASTER_API_KEY = os.getenv("X_MASTER_API_KEY")
+X_ACCESS_API_KEY = os.getenv("X_ACCESS_API_KEY")
+
 DB_CONFIG = {
     "database": os.getenv("DB_NAME", "db_prova_crud"),
     "user": os.getenv("DB_USER", "postgres"), # Usuário do banco
@@ -1160,17 +1163,24 @@ def ui_visualizar_dados_processados(con: PgConnection):
 
 def ui_exportar_dados_para_web(con: PgConnection):
     """Exporta dados para o JSONBin.io e exibe a URL pública."""
-    # Lê a chave da API do JSONBin.io das variáveis de ambiente
-    api_key = os.getenv("JSONBIN_API_KEY")
+    # Lê as chaves da API do JSONBin.io das variáveis de ambiente
+    x_master_api_key = os.getenv("X_MASTER_API_KEY")
+    x_access_api_key = os.getenv("X_ACCESS_API_KEY")
 
-    # Verifica se a chave foi configurada
+    # Prioriza a Access Key por ser mais segura. Se não existir, usa a Master Key.
+    api_key = x_access_api_key
+    header_name = 'X-Access-Key'
+
+    if not api_key:
+        api_key = x_master_api_key
+        header_name = 'X-Master-Key'
+
+    # Verifica se pelo menos uma das chaves foi configurada
     if not api_key:
         print(f"\n{Fore.RED}❌ ERRO: Chave de API para o JSONBin.io não configurada.{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Para usar esta função, você precisa de uma chave de API gratuita do JSONBin.io.{Style.RESET_ALL}") # type: ignore
-        print("1. Crie uma conta gratuita em: https://jsonbin.io/")
-        print("2. No painel, clique em 'API Keys' no menu superior.")
-        print("3. Copie a sua 'Master Key'.")
-        print("4. Configure-a como uma variável de ambiente chamada 'JSONBIN_API_KEY'.")
+        print(f"{Fore.YELLOW}Para usar esta função, configure 'X_ACCESS_API_KEY' ou 'X_MASTER_API_KEY' no seu arquivo .env.{Style.RESET_ALL}")
+        print("1. Crie uma conta em: https://jsonbin.io/")
+        print("2. No painel, vá em 'API Keys' e copie sua chave.")
         pause()
         return
 
@@ -1203,10 +1213,15 @@ def ui_exportar_dados_para_web(con: PgConnection):
         # URL da API v3 do JSONBin.io para criar um novo bin
         url = "https://api.jsonbin.io/v3/b"
         
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bin_name = f"exportacao_crud_{timestamp}"
+
         # Cabeçalhos necessários para a API v3, usando a chave pessoal do usuário.
         headers = {
             'Content-Type': 'application/json',
-            'X-Master-Key': api_key
+            header_name: api_key,  # Usa o cabeçalho correto (X-Access-Key ou X-Master-Key)
+            'X-Bin-Private': 'false', # <-- ADICIONADO: Torna o bin público
+            'X-Bin-Name': bin_name # <-- ADICIONADO: Dá um nome ao bin
         }
 
         print(f"Enviando dados para {url}...")
@@ -1214,11 +1229,12 @@ def ui_exportar_dados_para_web(con: PgConnection):
 
         if response.status_code == 200: # 200 é o código de sucesso para a criação de bin
             response_data = response.json()
-            # A URL pública para visualização não é mais retornada diretamente, construímos ela.
-            url_publica = f"https://jsonbin.io/{response_data.get('metadata', {}).get('id')}"
+            bin_id = response_data.get('metadata', {}).get('id')
+            # A URL pública para LEITURA dos dados na API v3 é diferente da URL de visualização antiga.
+            url_leitura_api = f"https://api.jsonbin.io/v3/b/{bin_id}"
             print(f"\n{Fore.GREEN}✅ Dados exportados com sucesso!{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Sua URL pública é:{Style.RESET_ALL} {url_publica}")
-            log_evento("INFO", f"Dados exportados para a web com sucesso. URL: {url_publica}")
+            print(f"{Fore.CYAN}Sua URL para acesso aos dados via API é:{Style.RESET_ALL} {url_leitura_api}")
+            log_evento("INFO", f"Dados exportados para a web com sucesso. URL da API: {url_leitura_api}")
         else:
             raise Exception(f"Falha ao enviar dados. Status: {response.status_code}, Resposta: {response.text}")
 
@@ -1296,7 +1312,25 @@ def ui_importar_dados(con: PgConnection):
 
         # ===== Requisição Web =====
         print(Fore.BLUE + f"🔗 Acessando URL: {url}" + Style.RESET_ALL)
-        response = requests.get(url)
+
+        headers = {}
+        # Se a URL for do jsonbin, precisamos enviar a chave de API para ler bins privados.
+        if 'jsonbin.io' in url:
+            x_master_api_key = os.getenv("X_MASTER_API_KEY")
+            x_access_api_key = os.getenv("X_ACCESS_API_KEY")
+
+            api_key = x_access_api_key
+            header_name = 'X-Access-Key'
+
+            if not api_key:
+                api_key = x_master_api_key
+                header_name = 'X-Master-Key'
+            
+            if api_key:
+                headers[header_name] = api_key
+                print(f"{Fore.CYAN}URL do JSONBin detectada. Usando a chave '{header_name}' para autenticação.{Style.RESET_ALL}")
+
+        response = requests.get(url, headers=headers)
         print(Fore.BLUE + f"📄 Código de Status HTTP: {response.status_code}" + Style.RESET_ALL)
 
         # Tratamento de erros detalhado com lista de códigos de status comuns e suas mensagens
@@ -1444,18 +1478,25 @@ def exibir_banner_inicial():
 def main():
     """Função principal que gerencia o ciclo de vida da aplicação."""
     try:
-        # Exibe o banner de boas-vindas
         exibir_banner_inicial()
 
-        # Inicializa o pool e cria as tabelas se necessário
-        log_evento("INFO", "Aplicação iniciada.")
-        DatabasePool.get_pool()
+        # 1. VERIFICAÇÃO CRÍTICA: A senha do banco de dados DEVE existir.
+        if not DB_CONFIG['password']:
+            print("\n❌ ERRO CRÍTICO: Variável de ambiente 'PG_PASSWORD' não configurada.")
+            print("Crie um arquivo .env com a linha: PG_PASSWORD=sua_senha")
+            pause()
+            sys.exit(1)
+
+        # 2. Agora que sabemos que a senha existe, inicializamos o pool e as tabelas.
+        print("Conectando ao banco de dados e preparando o ambiente...")
+        DatabasePool.get_pool() # Inicializa o pool de conexões.
         criar_tabelas()
-        
-        # As funções de UI agora usam a conexão antiga, vamos passar para elas
-        conexao = conectar_db()
-        if conexao and ui_login(conexao):
-            ui_menu_principal(conexao)
+        log_evento("INFO", "Aplicação iniciada.")
+
+        # 3. Com tudo pronto, iniciamos a interface de login usando o pool.
+        with get_db_connection() as con:
+            if ui_login(con):
+                ui_menu_principal(con)
     except Exception as erro:
         log_evento("CRITICAL", f"Erro fatal na aplicação: {erro}")
         print(f"Erro fatal: {erro}")
