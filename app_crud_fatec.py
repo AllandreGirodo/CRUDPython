@@ -263,9 +263,9 @@ def ui_sobre():
     print(Fore.MAGENTA + "="*40 + Style.RESET_ALL)
     print(Fore.CYAN + "TEMA ESCOLHIDO: " + Style.RESET_ALL + "Gerenciamento de Cadastros Simples")
     print(Fore.CYAN + "OBJETIVO: " + Style.RESET_ALL + "Desenvolver um aplicativo CRUD completo.")
-    print("\n" + Fore.YELLOW + "DESENVOLVEDOR:" + Style.RESET_ALL)
-    print("  - " + Fore.GREEN + "Nome: " + Style.RESET_ALL + "Allandre Ramos Girodo")
-    print("  - " + Fore.GREEN + "Matrícula: " + Style.RESET_ALL + "[2840482323046]")
+    print("\n" + Fore.YELLOW + "DESENVOLVEDORES:" + Style.RESET_ALL)
+    print("  - " + Fore.GREEN + "Nomes: " + Style.RESET_ALL + "Allandre Ramos Girodo | Caio Toledo de Sousa")
+    print("  - " + Fore.GREEN + "Matrículas:   " + Style.RESET_ALL + "[2840482323046 | 2840482313006]")
     print("  - " + Fore.GREEN + "Curso: " + Style.RESET_ALL + "Análise e Desenvolvimento de Sistemas - Fatec Ribeirão Preto")
     print(Fore.MAGENTA + "="*40 + Style.RESET_ALL)
     
